@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BRImo Statement - Accounting View & Recap</title>
     
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#00529C">
+
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -71,9 +74,29 @@
 </div>
 
 <script>
+    // === REGISTRASI SERVICE WORKER & FILE HANDLING API (PWA) ===
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(console.error);
+    }
+
+    if ('launchQueue' in window) {
+        window.launchQueue.setConsumer(async (launchParams) => {
+            if (launchParams.files && launchParams.files.length > 0) {
+                const files = [];
+                for (const handle of launchParams.files) {
+                    const file = await handle.getFile();
+                    files.push(file);
+                }
+                // Otomatis proses file yang dibuka via "Buka dengan..." di Android
+                eksekusiData(files);
+            }
+        });
+    }
+
+    // === VARIABEL GLOBAL ===
     let consolidatedData = [];
     let recapDataArray = [];
-    let allFilesData = []; // Tambahan: Menyimpan state semua file agar bisa dimodifikasi
+    let allFilesData = []; 
     const monthMap = { "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12 };
 
     function formatAccounting(number, extraClass = "") {
@@ -94,15 +117,20 @@
         return { sortVal: 0, label: fileName };
     }
 
-    async function mulaiProses() {
+    // Fungsi trigger dari tombol "Proses" manual
+    function mulaiProses() {
         const fileInput = document.getElementById('csvFiles');
         const files = Array.from(fileInput.files);
         if (files.length === 0) return alert("Pilih file CSV!");
+        eksekusiData(files);
+    }
 
+    // Fungsi inti membaca dan menyimpan file
+    async function eksekusiData(files) {
         document.getElementById('recapOutput').innerHTML = "";
         document.getElementById('detailOutput').innerHTML = "<div class='text-center'>Memproses data...</div>";
         
-        allFilesData = []; // Reset data utama
+        allFilesData = []; 
 
         for (let file of files) {
             const info = parseDateFromFilename(file.name);
@@ -110,16 +138,16 @@
             allFilesData.push({ info, data: content });
         }
 
-        // Urutkan file berdasarkan waktu
+        // Urutkan file berdasarkan kronologi periode/bulan
         allFilesData.sort((a, b) => a.info.sortVal - b.info.sortVal);
 
-        updateView(); // Panggil fungsi render
+        updateView(); 
 
         document.getElementById('btnExcel').disabled = false;
         document.getElementById('btnPdf').disabled = false;
     }
 
-    // Fungsi baru untuk merender ulang semua tabel dan hitungan saat ada perubahan data
+    // Fungsi render ulang tampilan & rekap
     function updateView() {
         consolidatedData = [];
         recapDataArray = [];
@@ -134,19 +162,17 @@
         renderRecapTable();
     }
 
-    // Fungsi baru untuk menghapus baris
+    // Fungsi hapus baris tertentu
     function hapusBaris(fileIndex, rowIndex) {
-        // Hapus 1 baris dari array data
         allFilesData[fileIndex].data.splice(rowIndex, 1);
-        
-        // Render ulang tampilan (rekap akan otomatis terhitung ulang)
-        updateView();
+        updateView(); // Hitung ulang & perbarui tabel
     }
 
     function readCsvAsync(file) {
         return new Promise((resolve) => {
             Papa.parse(file, {
-                header: true, skipEmptyLines: true,
+                header: true, 
+                skipEmptyLines: true,
                 complete: (res) => {
                     let sorted = res.data.sort((a,b) => new Date(a.TGL_TRAN) - new Date(b.TGL_TRAN));
                     resolve(sorted);
@@ -156,7 +182,7 @@
     }
 
     function calculateRecap(label, data) {
-        if (data.length === 0) return; // Abaikan jika semua data di bulan tersebut sudah dihapus
+        if (data.length === 0) return; // Lewati jika semua data pada periode ini telah dihapus
 
         let totalDebet = 0;
         let totalKredit = 0;
@@ -214,7 +240,7 @@
     }
 
     function renderTable(label, data, fileIndex) {
-        if (data.length === 0) return; // Jangan tampilkan tabel jika data kosong
+        if (data.length === 0) return; 
         const container = document.getElementById('detailOutput');
         const section = document.createElement('div');
         section.className = "file-section";
@@ -257,4 +283,36 @@
                         <tr>
                             <th>NO</th><th>TANGGAL</th><th>SALDO AWAL</th>
                             <th>DEBET (MASUK)</th><th>KREDIT (KELUAR)</th>
-                            <th>SALDO AKHIR</th><th>KETERANGAN<
+                            <th>SALDO AKHIR</th><th>KETERANGAN</th>
+                            <th class="no-print">AKSI</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+            </div>`;
+        container.appendChild(section);
+    }
+
+    function eksporKeExcel() {
+        const wb = XLSX.utils.book_new();
+        const wsRecap = XLSX.utils.json_to_sheet(recapDataArray);
+        XLSX.utils.book_append_sheet(wb, wsRecap, "Rekapitulasi");
+        const wsDetail = XLSX.utils.json_to_sheet(consolidatedData);
+        XLSX.utils.book_append_sheet(wb, wsDetail, "Rincian Mutasi");
+        XLSX.writeFile(wb, "E-Statement_BRImo_Full_Report.xlsx");
+    }
+
+    function eksporKePdf() {
+        const element = document.getElementById('printArea');
+        const opt = {
+            margin: 10,
+            filename: 'Laporan_BRImo_Lengkap.pdf',
+            html2canvas: { scale: 2 },
+            jsPDF: { unit: 'mm', format: [215, 330], orientation: 'portrait' }
+        };
+        html2pdf().set(opt).from(element).save();
+    }
+</script>
+
+</body>
+</html>
