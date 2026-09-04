@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BRImo Statement - Accounting View & Recap</title>
+    
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+    <style>
+        body { background-color: #f0f2f5; padding: 20px; font-family: 'Segoe UI', sans-serif; }
+        .main-card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-bottom: 30px; }
+        .header-bri { color: #00529C; font-weight: 800; border-bottom: 4px solid #F37021; padding-bottom: 10px; margin-bottom: 25px; text-transform: uppercase; }
+        
+        .recap-section { background: #e9ecef; padding: 20px; border-radius: 10px; margin-bottom: 40px; border: 1px solid #dee2e6; }
+        .file-section { background: white; padding: 20px; border-radius: 10px; margin-bottom: 30px; border-left: 5px solid #00529C; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .file-title { color: #00529C; margin-bottom: 15px; font-weight: bold; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        
+        /* Style Kolom Akuntansi */
+        .acc-column {
+            display: inline-block;
+            width: 120px; 
+            text-align: right;
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: 500;
+        }
+        
+        .text-debet { color: #198754; } 
+        .text-kredit { color: #dc3545; } 
+        
+        .table thead { background-color: #00529C; color: white; text-align: center; vertical-align: middle; }
+        .table-recap thead { background-color: #343a40; }
+        .table td { vertical-align: middle; }
+
+        @media print {
+            .no-print { display: none !important; }
+            .file-section, .recap-section { box-shadow: none; border: 1px solid #ccc; page-break-inside: avoid; }
+            body { padding: 0; background-color: white; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="main-card no-print">
+        <h2 class="header-bri">Pembaca Laporan BRImo</h2>
+        <p class="text-muted small">Mapping: Bank Kredit = Nasabah Debet (Masuk) | Bank Debet = Nasabah Kredit (Keluar)</p>
+        <div class="row g-3">
+            <div class="col-md-6">
+                <input class="form-control form-control-lg" type="file" id="csvFiles" accept=".csv" multiple>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary btn-lg w-100" onclick="mulaiProses()">Proses</button>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-success btn-lg w-100" id="btnExcel" onclick="eksporKeExcel()" disabled>Excel</button>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-danger btn-lg w-100" id="btnPdf" onclick="eksporKePdf()" disabled>PDF</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="printArea">
+        <div id="recapOutput"></div>
+        <div id="detailOutput"></div>
+    </div>
+</div>
+
+<script>
+    let consolidatedData = [];
+    let recapDataArray = [];
+    let allFilesData = []; // Tambahan: Menyimpan state semua file agar bisa dimodifikasi
+    const monthMap = { "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12 };
+
+    function formatAccounting(number, extraClass = "") {
+        if (isNaN(number) || number === null || number === "" || number === 0) {
+            return `<div class="text-center"><span class="acc-column text-muted">-</span></div>`;
+        }
+        const formatted = new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(number);
+        return `<div class="text-center"><span class="acc-column ${extraClass}">${formatted}</span></div>`;
+    }
+
+    function parseDateFromFilename(fileName) {
+        const match = fileName.match(/([a-zA-Z]+)(20\d{2})/);
+        if (match) {
+            const monthStr = match[1].substring(0, 3);
+            const year = parseInt(match[2]);
+            return { sortVal: (year * 100) + (monthMap[monthStr] || 0), label: match[0] };
+        }
+        return { sortVal: 0, label: fileName };
+    }
+
+    async function mulaiProses() {
+        const fileInput = document.getElementById('csvFiles');
+        const files = Array.from(fileInput.files);
+        if (files.length === 0) return alert("Pilih file CSV!");
+
+        document.getElementById('recapOutput').innerHTML = "";
+        document.getElementById('detailOutput').innerHTML = "<div class='text-center'>Memproses data...</div>";
+        
+        allFilesData = []; // Reset data utama
+
+        for (let file of files) {
+            const info = parseDateFromFilename(file.name);
+            const content = await readCsvAsync(file);
+            allFilesData.push({ info, data: content });
+        }
+
+        // Urutkan file berdasarkan waktu
+        allFilesData.sort((a, b) => a.info.sortVal - b.info.sortVal);
+
+        updateView(); // Panggil fungsi render
+
+        document.getElementById('btnExcel').disabled = false;
+        document.getElementById('btnPdf').disabled = false;
+    }
+
+    // Fungsi baru untuk merender ulang semua tabel dan hitungan saat ada perubahan data
+    function updateView() {
+        consolidatedData = [];
+        recapDataArray = [];
+        document.getElementById('detailOutput').innerHTML = "";
+        document.getElementById('recapOutput').innerHTML = "";
+        
+        allFilesData.forEach((obj, fileIndex) => {
+            calculateRecap(obj.info.label, obj.data);
+            renderTable(obj.info.label, obj.data, fileIndex);
+        });
+
+        renderRecapTable();
+    }
+
+    // Fungsi baru untuk menghapus baris
+    function hapusBaris(fileIndex, rowIndex) {
+        // Hapus 1 baris dari array data
+        allFilesData[fileIndex].data.splice(rowIndex, 1);
+        
+        // Render ulang tampilan (rekap akan otomatis terhitung ulang)
+        updateView();
+    }
+
+    function readCsvAsync(file) {
+        return new Promise((resolve) => {
+            Papa.parse(file, {
+                header: true, skipEmptyLines: true,
+                complete: (res) => {
+                    let sorted = res.data.sort((a,b) => new Date(a.TGL_TRAN) - new Date(b.TGL_TRAN));
+                    resolve(sorted);
+                }
+            });
+        });
+    }
+
+    function calculateRecap(label, data) {
+        if (data.length === 0) return; // Abaikan jika semua data di bulan tersebut sudah dihapus
+
+        let totalDebet = 0;
+        let totalKredit = 0;
+        
+        data.forEach(row => {
+            totalDebet += parseFloat(row.MUTASI_KREDIT) || 0;
+            totalKredit += parseFloat(row.MUTASI_DEBET) || 0;
+        });
+
+        recapDataArray.push({
+            periode: label,
+            saldoAwal: parseFloat(data[0].SALDO_AWAL_MUTASI) || 0,
+            debet: totalDebet,
+            kredit: totalKredit,
+            saldoAkhir: parseFloat(data[data.length - 1].SALDO_AKHIR_MUTASI) || 0
+        });
+    }
+
+    function renderRecapTable() {
+        if (recapDataArray.length === 0) return;
+        const container = document.getElementById('recapOutput');
+        let rowsHtml = "";
+        
+        recapDataArray.forEach((item, idx) => {
+            rowsHtml += `
+                <tr>
+                    <td class="text-center">${idx + 1}</td>
+                    <td class="fw-bold text-center">${item.periode}</td>
+                    <td>${formatAccounting(item.saldoAwal)}</td>
+                    <td>${formatAccounting(item.debet, "text-debet")}</td>
+                    <td>${formatAccounting(item.kredit, "text-kredit")}</td>
+                    <td>${formatAccounting(item.saldoAkhir, "fw-bold")}</td>
+                </tr>`;
+        });
+
+        container.innerHTML = `
+            <div class="recap-section">
+                <h3 class="file-title">📊 TABEL REKAPITULASI MUTASI</h3>
+                <div class="table-responsive">
+                    <table class="table table-bordered table-recap">
+                        <thead>
+                            <tr>
+                                <th>NO</th>
+                                <th>PERIODE</th>
+                                <th>SALDO AWAL</th>
+                                <th>TOTAL DEBET (+)</th>
+                                <th>TOTAL KREDIT (-)</th>
+                                <th>SALDO AKHIR</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rowsHtml}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    }
+
+    function renderTable(label, data, fileIndex) {
+        if (data.length === 0) return; // Jangan tampilkan tabel jika data kosong
+        const container = document.getElementById('detailOutput');
+        const section = document.createElement('div');
+        section.className = "file-section";
+        
+        let rowsHtml = "";
+        data.forEach((row, idx) => {
+            const nDebet = parseFloat(row.MUTASI_KREDIT) || 0;
+            const nKredit = parseFloat(row.MUTASI_DEBET) || 0;
+            
+            consolidatedData.push({
+                "Periode": label,
+                "Tanggal": row.TGL_TRAN,
+                "Saldo Awal": parseFloat(row.SALDO_AWAL_MUTASI),
+                "Debit (Masuk)": nDebet,
+                "Kredit (Keluar)": nKredit,
+                "Saldo Akhir": parseFloat(row.SALDO_AKHIR_MUTASI),
+                "Keterangan": row.REMARK_CUSTOM
+            });
+
+            rowsHtml += `
+                <tr>
+                    <td class="text-center">${idx + 1}</td>
+                    <td class="text-center small">${row.TGL_TRAN}</td>
+                    <td>${formatAccounting(row.SALDO_AWAL_MUTASI)}</td>
+                    <td>${formatAccounting(nDebet, "text-debet")}</td>
+                    <td>${formatAccounting(nKredit, "text-kredit")}</td>
+                    <td>${formatAccounting(row.SALDO_AKHIR_MUTASI, "fw-bold")}</td>
+                    <td><small>${row.REMARK_CUSTOM}</small></td>
+                    <td class="text-center no-print">
+                        <button class="btn btn-danger btn-sm" onclick="hapusBaris(${fileIndex}, ${idx})">❌</button>
+                    </td>
+                </tr>`;
+        });
+
+        section.innerHTML = `
+            <h4 class="file-title">Rincian Transaksi: ${label}</h4>
+            <div class="table-responsive">
+                <table class="table table-bordered table-sm table-hover">
+                    <thead>
+                        <tr>
+                            <th>NO</th><th>TANGGAL</th><th>SALDO AWAL</th>
+                            <th>DEBET (MASUK)</th><th>KREDIT (KELUAR)</th>
+                            <th>SALDO AKHIR</th><th>KETERANGAN<
